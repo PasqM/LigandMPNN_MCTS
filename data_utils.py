@@ -783,10 +783,11 @@ def parse_PDB(
         for item in chains:
             str_out += " chain " + item + " or"
         atoms = atoms.select(str_out[1:-3])
-
-    protein_atoms = atoms.select("protein")
+    
+    # Read PTM residues as ligands
+    protein_atoms = atoms.select("stdaa")
     backbone = protein_atoms.select("backbone")
-    other_atoms = atoms.select("not protein and not water")
+    other_atoms = atoms.select("not stdaa and not water")
     water_atoms = atoms.select("water")
 
     CA_atoms = protein_atoms.select("name CA")

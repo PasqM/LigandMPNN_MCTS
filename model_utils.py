@@ -491,10 +491,10 @@ class ProteinMPNN(torch.nn.Module):
 
         h_V_enc, h_E_enc, E_idx_enc = self.encode(feature_dict)
         log_probs_out = torch.zeros([B_decoder, L, 21], device=device).float()
-        logits_out = torch.zeros([B_decoder, L, 21], device=device).float()
-        decoding_order_out = torch.zeros([B_decoder, L, L], device=device).float()
-
-        for idx in range(L):
+        # Compute score only on masked positions
+        chain_mask_enc = chain_mask_enc.cpu().numpy()
+        idx_to_loop = np.argwhere(chain_mask_enc[0,:]==1)[:,0]
+        for idx in idx_to_loop:
             h_V = torch.clone(h_V_enc)
             E_idx = torch.clone(E_idx_enc)
             mask = torch.clone(mask_enc)
@@ -508,7 +508,6 @@ class ProteinMPNN(torch.nn.Module):
             decoding_order = torch.argsort(
                 (order_mask + 0.0001) * (torch.abs(randn))
             )  # [numbers will be smaller for places where chain_M = 0.0 and higher for places where chain_M = 1.0]
-            E_idx = E_idx.repeat(B_decoder, 1, 1)
             permutation_matrix_reverse = torch.nn.functional.one_hot(
                 decoding_order, num_classes=L
             ).float()
@@ -522,16 +521,12 @@ class ProteinMPNN(torch.nn.Module):
             mask_1D = mask.view([B, L, 1, 1])
             mask_bw = mask_1D * mask_attend
             mask_fw = mask_1D * (1.0 - mask_attend)
-            S_true = S_true.repeat(B_decoder, 1)
-            h_V = h_V.repeat(B_decoder, 1, 1)
-            h_E = h_E_enc.repeat(B_decoder, 1, 1, 1)
-            mask = mask.repeat(B_decoder, 1)
 
             h_S = self.W_s(S_true)
-            h_ES = cat_neighbors_nodes(h_S, h_E, E_idx)
+            h_ES = cat_neighbors_nodes(h_S, h_E_enc, E_idx)
 
             # Build encoder embeddings
-            h_EX_encoder = cat_neighbors_nodes(torch.zeros_like(h_S), h_E, E_idx)
+            h_EX_encoder = cat_neighbors_nodes(torch.zeros_like(h_S), h_E_enc, E_idx)
             h_EXV_encoder = cat_neighbors_nodes(h_V, h_EX_encoder, E_idx)
 
             h_EXV_encoder_fw = mask_fw * h_EXV_encoder
@@ -545,16 +540,7 @@ class ProteinMPNN(torch.nn.Module):
             log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
             
             log_probs_out[:,idx,:] = log_probs[:,idx,:]
-            logits_out[:,idx,:] = logits[:,idx,:]
-            decoding_order_out[:,idx,:] = decoding_order
-
-        output_dict = {
-            "S": S_true,
-            "log_probs": log_probs_out,
-            "logits": logits_out,
-            "decoding_order": decoding_order_out,
-        }
-        return output_dict
+        return log_probs_out
 
 
     def score(self, feature_dict, use_sequence: bool):
@@ -584,7 +570,6 @@ class ProteinMPNN(torch.nn.Module):
             (chain_mask + 0.0001) * (torch.abs(randn))
         )  # [numbers will be smaller for places where chain_M = 0.0 and higher for places where chain_M = 1.0]
         if len(symmetry_list_of_lists[0]) == 0 and len(symmetry_list_of_lists) == 1:
-            E_idx = E_idx.repeat(B_decoder, 1, 1)
             permutation_matrix_reverse = torch.nn.functional.one_hot(
                 decoding_order, num_classes=L
             ).float()
@@ -631,11 +616,6 @@ class ProteinMPNN(torch.nn.Module):
             mask_bw = mask_bw.repeat(B_decoder, 1, 1, 1)
             decoding_order = decoding_order.repeat(B_decoder, 1)
 
-        S_true = S_true.repeat(B_decoder, 1)
-        h_V = h_V.repeat(B_decoder, 1, 1)
-        h_E = h_E.repeat(B_decoder, 1, 1, 1)
-        mask = mask.repeat(B_decoder, 1)
-
         h_S = self.W_s(S_true)
         h_ES = cat_neighbors_nodes(h_S, h_E, E_idx)
 
@@ -657,13 +637,7 @@ class ProteinMPNN(torch.nn.Module):
         logits = self.W_out(h_V)
         log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
 
-        output_dict = {
-            "S": S_true,
-            "log_probs": log_probs,
-            "logits": logits,
-            "decoding_order": decoding_order,
-        }
-        return output_dict
+        return log_probs
 
 
 class ProteinFeaturesLigand(torch.nn.Module):

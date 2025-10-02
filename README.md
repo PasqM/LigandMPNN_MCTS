@@ -604,6 +604,9 @@ python run.py \
         --pack_with_ligand_context 0
 ```
 
+### 6 Multistate design with Monte Carlo Tree Search
+You can run multistate design with Monte Carlo Tree Search to optimize one sequence to fold in a certain conformation or bind a certain ligand. In that case the --pdb_path_multi file should contain the weight of each structure as the value of the structure dictionary.
+
 ### Things to add
 - Support for ProteinMPNN CA-only model.
 - Examples for scoring sequences only.
