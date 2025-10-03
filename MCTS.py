@@ -6,6 +6,7 @@ import random
 import sys
 
 import numpy as np
+import pandas as pd
 import torch
 from data_utils import (
     alphabet,
@@ -33,7 +34,8 @@ def _scores(S, log_probs, mask):
 
 class ProteinOptimizer:
     def __init__(self, initial_sequence, model, feature_dict, alphabet_dict, device, cb=19652, ci=1.25, max_mutations=3, min_step=0.0):
-        self.initial_sequence = initial_sequence
+        self.initial_sequence = initial_sequence[0]
+        self.modified_positions = initial_sequence[1]
         self.initial_encoding = feature_dict["S"].clone().long()
         self.model = model
         self.alphabet_dict = alphabet_dict
@@ -67,7 +69,7 @@ class ProteinOptimizer:
         mutations = []
         for i in range(min(len(self.initial_sequence),len(seq))):
             if self.initial_sequence[i] != seq[i]:
-                mutations.append(i)
+                mutations.append(self.modified_positions[i])
         return mutations
 
     def predict(self, Seq, mutations):
@@ -106,7 +108,6 @@ class ProteinOptimizer:
                 device=self.device,
             )
             mutation_M = torch.zeros_like(self.mask, device=self.device)
-            print(mutations)
             mutation_M[:,mutations] = 1
             self.feature_dict['chain_mask'] = mutation_M
             log_probs = self.model.score(self.feature_dict, True)
@@ -132,23 +133,22 @@ class ProteinOptimizer:
             nodes[last_sequence]['visits'] += 1
             if self._count_mutations(last_sequence) < self.max_mutations:
                 for i, letter in enumerate(last_sequence):
-                    Seq[:,i] = self.alphabet_dict[letter]
+                    Seq[:,self.modified_positions[i]] = self.alphabet_dict[letter]
                 predicted_scores = self.predict(Seq, nodes[last_sequence]['mutations'])
-                nodes[last_sequence]['children'] = []
-                for i in range(len(last_sequence)):
+                for i, pos in enumerate(self.modified_positions):
                     for j, amino_acid in enumerate(alphabet):
-                        if amino_acid == last_sequence[i] or predicted_scores[i,j] <= 0:
+                        if amino_acid == last_sequence[i] or predicted_scores[pos,j] <= 0:
                             continue
                         mutated_sequence = self._mutate(last_sequence, i, amino_acid)
                         nodes[last_sequence]['children'].append(mutated_sequence)
                         if mutated_sequence not in nodes:
-                            nodes[mutated_sequence] = {'score': 0, 'visits': 0, 'children': set(), 'mutations': self.find_mutations(mutated_sequence)}
-                        nodes[mutated_sequence]['predicted_score'] = predicted_scores[i,j]
+                            nodes[mutated_sequence] = {'score': 0, 'visits': 0, 'children': [], 'mutations': self.find_mutations(mutated_sequence)}
+                        nodes[mutated_sequence]['predicted_score'] = predicted_scores[pos,j]
             
             if len(nodes[last_sequence]['children']) == 0:
                 score = self.full_score(Seq, WT_seq, nodes[last_sequence]['mutations'])
                 if last_sequence not in sequence_dict:
-                    sequence_dict[last_sequence] = [score, [str(k+1)+last_sequence[k] for k in nodes[last_sequence]['mutations']], 1]
+                    sequence_dict[last_sequence] = [score, [str(self.modified_positions[i] + 1) + a for i, a in enumerate(last_sequence) if a != self.initial_sequence[i]], 1]
                 else:
                     sequence_dict[last_sequence][0] = (sequence_dict[last_sequence][0] * sequence_dict[last_sequence][2] + score) / (sequence_dict[last_sequence][2] + 1)
                     sequence_dict[last_sequence][2] += 1
@@ -156,17 +156,17 @@ class ProteinOptimizer:
                     nodes[sequence]['score'] = (nodes[sequence]['score'] * (nodes[sequence]['visits'] -1) + score) / nodes[sequence]['visits']
                 last_sequence = self.initial_sequence
                 path = []
-                continue
+            
+            else:
+                best_uct = -float('inf')
+                best_child = None
+                for child_seq in nodes[last_sequence]['children']:
+                    uct = self._uct(nodes[child_seq], nodes[last_sequence]['visits'])
+                    if uct > best_uct:
+                        best_uct = uct
+                        best_child = child_seq
 
-            best_uct = -float('inf')
-            best_child = None
-            for child_seq in nodes[last_sequence]['children']:
-                uct = self._uct(nodes[child_seq], nodes[last_sequence]['visits'])
-                if uct > best_uct:
-                    best_uct = uct
-                    best_child = child_seq
-
-            last_sequence = best_child
+                last_sequence = best_child
         return nodes, sequence_dict
 
 def main(args) -> None:
@@ -189,9 +189,6 @@ def main(args) -> None:
         os.makedirs(base_folder, exist_ok=True)
     if not os.path.exists(base_folder + "seqs"):
         os.makedirs(base_folder + "seqs", exist_ok=True)
-    if args.save_stats:
-        if not os.path.exists(base_folder + "stats"):
-            os.makedirs(base_folder + "stats", exist_ok=True)
     if args.model_type == "protein_mpnn":
         checkpoint_path = args.checkpoint_protein_mpnn
     elif args.model_type == "ligand_mpnn":
@@ -477,11 +474,6 @@ def main(args) -> None:
             other_bfactors = other_atoms.getBetas()
             other_atoms.setBetas(other_bfactors * 0.0)
 
-        # adjust input PDB name by dropping .pdb if it does exist
-        name = pdb[pdb.rfind("/") + 1 :]
-        if name[-4:] == ".pdb":
-            name = name[:-4]
-
         if args.verbose:
             if "Y" in list(protein_dict):
                 atom_coords = protein_dict["Y"].cpu().numpy()
@@ -515,7 +507,6 @@ def main(args) -> None:
         feature_dict["batch_size"] = args.batch_size
         B, L, _, _ = feature_dict["X"].shape  # batch size should be 1 for now.
         # add additional keys to the feature dictionary
-        feature_dict["temperature"] = args.temperature
         feature_dict["bias"] = (
             (-1e8 * omit_AA[None, None, :] + bias_AA).repeat([1, L, 1])
             + bias_AA_per_residue[None]
@@ -523,12 +514,13 @@ def main(args) -> None:
         )
         feature_dict["symmetry_residues"] = remapped_symmetry_residues
         feature_dict["symmetry_weights"] = symmetry_weights
+        feature_dict["mask_c"] = protein_dict["mask_c"]
         features_list.append(feature_dict)
     features_dict = {}
     for key in features_list[0].keys():
         if key == 'batch_size':
             features_dict[key] = features_list[0][key] * len(features_list)
-        elif key in ['temperature', 'symmetry_residues', 'symmetry_weights']:
+        elif key in ['symmetry_residues', 'symmetry_weights', 'mask_c']:
             features_dict[key] = features_list[0][key]
         else:
             # If the lengths of the proteins are different, we need to pad them with zeros
@@ -551,9 +543,10 @@ def main(args) -> None:
     features_dict['weights'] = torch.tensor(weights, device=device, dtype=torch.float32)
     features_dict['positive_weights'] = (features_dict['weights'] > 0).float()
 
-    initial_sequence = "".join(
-                [restype_int_to_str[AA] for i, AA in enumerate(feature_dict["S"][0].cpu().numpy()) if feature_dict["chain_labels"][0,i] == 0]
-            )
+    initial_sequence = (
+        "".join([restype_int_to_str[AA] for i, AA in enumerate(feature_dict["S"][0].cpu().numpy()) if feature_dict["chain_mask"][0,i] == 1]),
+        tuple(np.argwhere(feature_dict["chain_mask"][0].cpu().numpy() == 1).flatten().tolist())
+    )
 
     optimizer = ProteinOptimizer(
         initial_sequence=initial_sequence,
@@ -565,6 +558,30 @@ def main(args) -> None:
         min_step=args.min_step
     )
     nodes, sequence_dict = optimizer.search(args.number_of_iterations)
+
+    sequences_df = pd.DataFrame.from_dict(sequence_dict, orient='index')
+    sequences_df.columns = ['score', 'mutations', 'count']
+    sequences_df = sequences_df.sort_values(by='score', ascending=False)
+    sequences = []
+    for row in sequences_df.itertuples():
+        sequence = ''
+        for mask in features_dict["mask_c"]:
+            chain = np.argwhere(mask.cpu().numpy())
+            if torch.sum(features_dict["chain_mask"][0,chain]) > 0:
+                seq = [restype_int_to_str[int(AA)] for AA in features_dict["S"][0][chain].cpu().numpy()]
+                for el in row.mutations:
+                    idx = int(el[:-1]) - 1
+                    aa = el[-1]
+                    if idx in chain:
+                        seq[idx - chain[0][0]] = aa
+                sequence += ''.join(seq)
+                sequence += args.fasta_seq_separation
+        sequences.append(sequence[:-1])
+    sequences_df.index = sequences
+    name = args.pdb_path_multi.split("/")[-1].split(".")[0]
+    output_path = f"{args.out_folder}/{name}_MCTS_results.tsv"
+    sequences_df.to_csv(output_path, sep='\t', index_label='sequence')
+    print(f"Results saved to: {output_path}")
 
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser(
@@ -717,15 +734,7 @@ if __name__ == "__main__":
         type=str,
         help="Path to a folder to output sequences, e.g. /home/out/",
     )
-    argparser.add_argument(
-        "--file_ending", type=str, default="", help="adding_string_to_the_end"
-    )
-    argparser.add_argument(
-        "--zero_indexed",
-        type=str,
-        default=0,
-        help="1 - to start output PDB numbering with 0",
-    )
+
     argparser.add_argument(
         "--seed",
         type=int,
@@ -737,21 +746,6 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Number of sequence to generate per one pass.",
-    )
-    argparser.add_argument(
-        "--number_of_batches",
-        type=int,
-        default=1,
-        help="Number of times to design sequence using a chosen batch size.",
-    )
-    argparser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.1,
-        help="Temperature to sample sequences.",
-    )
-    argparser.add_argument(
-        "--save_stats", type=int, default=0, help="Save output statistics"
     )
 
     argparser.add_argument(
@@ -769,7 +763,7 @@ if __name__ == "__main__":
     argparser.add_argument(
         "--ligand_mpnn_use_side_chain_context",
         type=int,
-        default=1,
+        default=0,
         help="Flag to use side chain atoms as ligand context for the fixed residues",
     )
     argparser.add_argument(
