@@ -565,6 +565,16 @@ class ProteinMPNN(torch.nn.Module):
 
         h_V, h_E, E_idx = self.encode(feature_dict)
 
+        if h_V.shape[0] != B_decoder:
+            h_V = h_V.repeat(B_decoder, 1, 1)
+            h_E = h_E.repeat(B_decoder, 1, 1, 1)
+            E_idx = E_idx.repeat(B_decoder, 1, 1)
+            mask = mask.repeat(B_decoder, 1)
+            chain_mask = chain_mask.repeat(B_decoder, 1)
+
+        if S_true.shape[0] != B_decoder:
+            S_true = S_true.repeat(B_decoder, 1)
+
         chain_mask = mask * chain_mask  # update chain_M to include missing regions
         decoding_order = torch.argsort(
             (chain_mask + 0.0001) * (torch.abs(randn))
