@@ -379,20 +379,17 @@ def main(args) -> None:
                 S_current[:,i] = restype_str_to_int[sequence[current_chain][chain_pos]]
                 chain_pos += 1
             S_new = torch.cat([S_new, S_current], dim=0)
+        random_perm = torch.randn([1, feature_dict["mask"].shape[1]], device=device)
         for n_batch in range((S_new.shape[0] - 1) // args.batch_size + 1):
             feature_dict["S"] = S_new[n_batch * args.batch_size : min((n_batch + 1) * args.batch_size, S_new.shape[0]), :]
             feature_dict['batch_size'] = feature_dict["S"].shape[0]
-            feature_dict["randn"] = torch.randn(
-                [feature_dict["batch_size"], feature_dict["mask"].shape[1]],
-                device=device,
-            )
+            feature_dict["randn"] = random_perm.repeat(feature_dict['batch_size'], 1)
             with torch.no_grad():
                 log_probs = model.score(feature_dict, True)
                 for i in range(log_probs.shape[0]):
                     score = get_score(feature_dict["S"][i,:].reshape(-1).to(torch.long), log_probs[i,:], feature_dict["mask"]*feature_dict["chain_mask"])[0].detach().cpu().numpy()
                     print(f"PDB: {pdb}, Sequence: {n_batch * args.batch_size + i}, Score: {score[0]}")
-            break
-
+                    
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
