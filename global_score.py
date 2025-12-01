@@ -389,8 +389,9 @@ def main(args) -> None:
             with torch.no_grad():
                 log_probs = model.score(feature_dict, True)
                 for i in range(log_probs.shape[0]):
-                    score = get_score(feature_dict["S"][i,:].reshape(-1).to(torch.long), log_probs[i,:], feature_dict["mask"])[0].detach().cpu().numpy()
+                    score = get_score(feature_dict["S"][i,:].reshape(-1).to(torch.long), log_probs[i,:], feature_dict["mask"]*feature_dict["chain_mask"])[0].detach().cpu().numpy()
                     print(f"PDB: {pdb}, Sequence: {n_batch * args.batch_size + i}, Score: {score[0]}")
+            break
 
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser(
